@@ -2,6 +2,96 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
+
+
+
+
+# function to "corrupt" memory vectors, for use as initial condition to system
+def generate_corruption_vector(length, corruption, device):
+    """
+    Generates a vector of 1s and -1s based on a specified corruption probability.
+
+    Parameters:
+    - length: The length of the output vector.
+    - corruption: The probability of an element being -1 (p(-1)).
+
+    Returns:
+    - A torch.Tensor of shape (length,) with elements set to 1 with probability `1 - corruption` and to -1 with probability `corruption`.
+    """
+    # Generate a random vector with values between 0 and 1
+    random_vector = torch.rand(length,device = device)
+
+    # Elements <= 1 - corruption are set to 1, others are set to -1
+    # This inverts the condition to meet the specified probabilities
+    output_vector = torch.where(random_vector <= (1 - corruption), torch.tensor(1), torch.tensor(-1))
+
+    return output_vector
+
+def integrate_dynamics(N=500, K=10, NUM_STEPS=1000, dt=0.05, beta=5, corruption_level=0.00, 
+                        etas=None, memory_to_seed_from=2, device='cpu'):
+    """
+    Simulates the Euler integration of a Hopfield-like network with optional customization.
+    
+    Parameters:
+    - N: Number of neurons
+    - K: Number of memories
+    - NUM_STEPS: Number of Euler steps for integration
+    - dt: Euler step size
+    - beta: Gain of nonlinearity
+    - corruption_level: Controls the degree of corruption of the initial state
+    - etas: Predefined memory matrix (optional)
+    - memory_to_seed_from: Index of the memory to initialize dynamics near
+    - device: Computation device ('cpu' or 'cuda')
+    """
+    
+    # Generate random binary memories if not provided
+    if etas is None:
+        etas = 2 * torch.randint(2, (N, K), device=device).float() - 1
+    
+    # Select which memory to initialize dynamics near
+    assert memory_to_seed_from <= etas.shape[-1], print("We do not  have that many memories!")
+    mem = etas[:, memory_to_seed_from]
+    
+    alpha = 0
+
+    # Initialize all dynamic variables near the desired fixed point
+    x0 = mem * generate_corruption_vector(N, corruption_level, device)
+    
+    # Initial states calculations
+    psi_0 = -torch.outer(torch.tanh(beta * x0), torch.tanh(beta * x0))
+    P0 = (1 / beta) * torch.atanh(psi_0)
+    S0 = (1 / beta) * torch.atanh(-(1 / N ** 3) * torch.einsum('im,jm,km,lm,kl->ij', etas, etas, etas, etas, psi_0))
+    
+    # Initializing variables for dynamics
+    x, S, P = x0.clone(), S0.clone(), P0.clone()
+    
+    # Euler integration of dynamics
+    for _ in tqdm(range(NUM_STEPS)):
+        h = torch.tanh(beta * x)
+        g = torch.tanh(beta * S)
+        psi = torch.tanh(beta * P)
+
+        x += dt * (-alpha*x + g @ h)
+        S += dt * (-alpha*S + torch.outer(h, h) + psi)
+        P += dt * (-alpha*P + (1 / N ** 3) * torch.einsum('im,jm,km,lm,kl->ij', etas, etas, etas, etas, psi) + g)
+    
+    # Check whether dynamics converged to the correct attractor
+    initial_distance = torch.norm(torch.sign(x0) - mem)
+    final_distance = torch.norm(torch.sign(h) - mem)
+    
+    print(f'Initial L2 distance of neural state to memory {memory_to_seed_from} is {initial_distance}')
+    print(f'Final L2 distance of neural state to memory {memory_to_seed_from} is {final_distance}')
+    
+    return x, S, P, initial_distance, final_distance,x0
+
+
+
+
+
+
+
+
 
 # Custom round function
 class RoundWithGradient(torch.autograd.Function):
